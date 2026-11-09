@@ -12,7 +12,7 @@
   header span { color: #8b95a7; }
   header div { margin-left: auto; display: flex; gap: 10px; align-items: center; }
   button { font: inherit; background: #131722; color: inherit; border: 1px solid #232a3a; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
-  a { color: #f5a524; }
+  a { color: #c084fc; }
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0 12px; }
   .stats div, canvas, figure { background: #131722; border: 1px solid #232a3a; border-radius: 8px; }
   .stats div { padding: 10px 16px; color: #8b95a7; }
@@ -21,7 +21,7 @@
   .samples { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
   figure { margin: 0; padding: 12px 16px; min-width: 0; }
   figcaption { color: #8b95a7; margin-bottom: 6px; }
-  figure:last-child figcaption { color: #f5a524; }
+  figure:last-child figcaption { color: #c084fc; }
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; height: 250px; overflow: hidden; }
   @media (max-width: 760px) { .stats { grid-template-columns: 1fr 1fr; } .samples { grid-template-columns: 1fr; } }
 </style>
@@ -73,7 +73,7 @@ function draw() {
   g.fillText(`${n} steps`, W - 90, H - 8);
   g.setLineDash([5, 5]); g.strokeStyle = '#8b95a7'; g.beginPath(); g.moveTo(44, Y(top)); g.lineTo(W - 16, Y(top)); g.stroke(); g.setLineDash([]);
   g.fillText(`random guessing: ln(${chars.length}) = ${top.toFixed(2)}`, 56, Y(top) - 6);
-  g.strokeStyle = '#f5a524'; g.lineWidth = 2; g.beginPath();
+  g.strokeStyle = '#c084fc'; g.lineWidth = 2; g.beginPath();
   losses.forEach((v, i) => i ? g.lineTo(X(i), Y(Math.max(v, lo))) : g.moveTo(X(i), Y(v)));
   g.stroke();
 }
