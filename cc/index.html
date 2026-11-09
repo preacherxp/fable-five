@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cc: a C-subset compiler to WebAssembly, in the browser</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7dce5; font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  body { display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid #232a3a; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; color: #fff; }
+  h1 span { color: #8b95a7; font-weight: 400; }
+  select, button { font: inherit; background: #131722; color: inherit; border: 1px solid #232a3a; border-radius: 6px; padding: 6px 12px; }
+  button { background: #f5a524; color: #0b0e14; border-color: #f5a524; font-weight: 700; cursor: pointer; }
+  #status { margin-left: auto; color: #8b95a7; }
+  #status.err { color: #fb7185; }
+  a { color: #f5a524; }
+  main { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+  textarea { background: #0b0e14; color: #d7dce5; border: 0; border-right: 1px solid #232a3a; padding: 18px 20px; font: inherit; resize: none; outline: none; tab-size: 2; white-space: pre; }
+  #right { display: grid; grid-template-rows: 1fr 190px; min-height: 0; }
+  pre { margin: 0; padding: 18px 20px; overflow: auto; }
+  #out { color: #f5a524; line-height: 1.15; }
+  #hex { border-top: 1px solid #232a3a; color: #6b7588; font-size: 12px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } textarea { min-height: 50vh; border-right: 0; } }
+</style>
+<header>
+  <h1>cc <span>C in, WebAssembly bytes out.</span></h1>
+  <select id="ex"></select>
+  <button id="run">Run (Ctrl+Enter)</button>
+  <span id="status"></span>
+  <a href="../">all five</a>
+</header>
+<main>
+  <textarea id="src" spellcheck="false" autocapitalize="off"></textarea>
+  <div id="right"><pre id="out"></pre><pre id="hex"></pre></div>
+</main>
+<script src="cc.js"></script>
+<script>
+const EXAMPLES = {
+'mandelbrot.c': `// Mandelbrot set in fixed-point integers.
+// Compiled to WebAssembly by a compiler running in this tab.
+
+int mandel(int cr, int ci) {
+  int zr = 0, zi = 0, i = 0;
+  while (i < 60) {
+    int zr2 = zr * zr >> 12, zi2 = zi * zi >> 12;
+    if (zr2 + zi2 > 4 << 12) break;
+    zi = (zr * zi >> 11) + ci;
+    zr = zr2 - zi2 + cr;
+    i++;
+  }
+  return i;
+}
+
+int main() {
+  int x, y;
+  for (y = -14; y <= 14; y++) {
+    for (x = -52; x <= 25; x++)
+      putchar(" .,:;=+*#%@"[mandel(x * 170, y * 330) * 10 / 60]);
+    putchar('\\n');
+  }
+  return 0;
+}
+`,
+'primes.c': `// Sieve of Eratosthenes. The array lives in WebAssembly linear memory.
+
+int sieve[10000];
+
+void print(int n) {
+  if (n > 9) print(n / 10);
+  putchar('0' + n % 10);
+}
+
+int main() {
+  int i, j, count = 0;
+  for (i = 2; i < 10000; i++) {
+    if (sieve[i]) continue;
+    count++;
+    if (count <= 100) { print(i); putchar(count % 10 ? ' ' : '\\n'); }
+    for (j = i * i; j < 10000; j += i) sieve[j] = 1;
+  }
+  return count;
+}
+`,
+'hanoi.c': `// Recursion, globals and strings: Towers of Hanoi.
+
+int moves;
+
+void puts(int s) { int i = 0; while (s[i]) putchar(s[i++]); }
+
+void print(int n) {
+  if (n > 9) print(n / 10);
+  putchar('0' + n % 10);
+}
+
+void hanoi(int n, int from, int to, int via) {
+  if (n == 0) return;
+  hanoi(n - 1, from, via, to);
+  moves++;
+  if (n >= 3) {
+    puts("disk "); print(n); puts(": ");
+    putchar(from); puts(" -> "); putchar(to); putchar('\\n');
+  }
+  hanoi(n - 1, via, to, from);
+}
+
+int main() {
+  hanoi(5, 'A', 'C', 'B');
+  puts("total moves: "); print(moves); putchar('\\n');
+  return moves;
+}
+`,
+};
+
+const $ = id => document.getElementById(id), src = $('src'), status = $('status');
+let bytes = null;
+
+function build() {
+  status.className = '';
+  try {
+    const t = performance.now();
+    bytes = CC.compile(src.value);
+    status.textContent = `${src.value.length} bytes of C → ${bytes.length} bytes of WebAssembly in ${(performance.now() - t).toFixed(1)} ms`;
+    $('hex').textContent = [...bytes].reduce((s, b, i) => s + (i % 24 ? ' ' : (i ? '\n' : '') + i.toString(16).padStart(4, '0') + '  ') + b.toString(16).padStart(2, '0'), '');
+  } catch (e) { bytes = null; status.className = 'err'; status.textContent = e.message; }
+}
+
+async function run() {
+  build();
+  if (!bytes) return;
+  try {
+    const t = performance.now(), r = await CC.run(bytes);
+    $('out').textContent = r.out + `\n[main returned ${r.ret} in ${(performance.now() - t).toFixed(1)} ms]`;
+  } catch (e) { $('out').textContent = 'runtime error: ' + e.message; }
+}
+
+for (const name in EXAMPLES) $('ex').add(new Option(name));
+$('ex').onchange = () => { src.value = EXAMPLES[$('ex').value]; run(); };
+$('run').onclick = run;
+src.oninput = build;
+src.onkeydown = e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); }
+  if (e.key === 'Tab') { e.preventDefault(); src.setRangeText('  ', src.selectionStart, src.selectionEnd, 'end'); build(); }
+};
+src.value = EXAMPLES['mandelbrot.c'];
+run();
+</script>
+</html>

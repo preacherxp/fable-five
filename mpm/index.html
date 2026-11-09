@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLS-MPM: water, jelly and snow in one solver</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7dce5; font: 14px/1.6 ui-monospace, Menlo, Consolas, monospace; }
+  main { display: flex; gap: 28px; height: 100%; padding: 24px; align-items: center; justify-content: center; }
+  canvas { height: min(calc(100vh - 48px), calc(100vw - 48px)); aspect-ratio: 1; background: #05070b; border: 1px solid #232a3a; border-radius: 8px; touch-action: none; cursor: crosshair; }
+  aside { width: 330px; }
+  h1 { font-size: 20px; margin: 0 0 8px; color: #fff; }
+  p { color: #8b95a7; margin: 0 0 18px; }
+  button { font: inherit; background: #131722; color: inherit; border: 1px solid #232a3a; border-radius: 6px; padding: 6px 12px; cursor: pointer; margin: 0 6px 8px 0; }
+  button i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 18px 0; }
+  dt { color: #8b95a7; } dd { margin: 0; color: #fff; }
+  a { color: #f5a524; }
+  @media (max-width: 900px) { main { flex-direction: column; height: auto; } aside { width: 100%; } }
+</style>
+<main>
+  <canvas id="c"></canvas>
+  <aside>
+    <h1>Water, jelly and snow</h1>
+    <p>One solver for all three: the moving least squares material point method. Particles carry mass and deformation, a grid resolves the collisions. Drag through it.</p>
+    <div>
+      <button data-m="0"><i style="background:#38bdf8"></i>Water</button>
+      <button data-m="1"><i style="background:#fb7185"></i>Jelly</button>
+      <button data-m="2"><i style="background:#f1f5f9"></i>Snow</button>
+      <button id="reset">Reset</button>
+    </div>
+    <dl>
+      <dt>particles</dt><dd id="n">–</dd>
+      <dt>grid</dt><dd>80 × 80</dd>
+      <dt>steps per frame</dt><dd id="sub">–</dd>
+      <dt>physics per frame</dt><dd id="ms">–</dd>
+    </dl>
+    <a href="../">all five</a>
+  </aside>
+</main>
+<script src="sim.js"></script>
+<script>
+const $ = id => document.getElementById(id), c = $('c'), g = c.getContext('2d');
+const COLORS = ['#38bdf8', '#fb7185', '#f1f5f9'], SUB = 12, PER_CELL = 6;
+const block = (x, y, half, m) => MPM.addBlock(x, y, half, m, Math.round((2 * half * MPM.N) ** 2 * PER_CELL));
+
+function scene() {
+  MPM.reset();
+  block(0.24, 0.44, 0.17, MPM.WATER);
+  block(0.56, 0.76, 0.11, MPM.JELLY);
+  block(0.79, 0.4, 0.12, MPM.SNOW);
+}
+
+const ptr = { x: 0, y: 0, px: 0, py: 0, down: false };
+const at = e => { const r = c.getBoundingClientRect(); ptr.x = (e.clientX - r.left) / r.width; ptr.y = 1 - (e.clientY - r.top) / r.height; };
+c.onpointerdown = e => { at(e); ptr.px = ptr.x; ptr.py = ptr.y; ptr.down = true; c.setPointerCapture(e.pointerId); };
+c.onpointermove = at;
+c.onpointerup = () => ptr.down = false;
+
+document.querySelectorAll('[data-m]').forEach(b => b.onclick = () => block(0.3 + Math.random() * 0.4, 0.82, 0.07, +b.dataset.m));
+$('reset').onclick = scene;
+
+let ms = 0;
+function frame() {
+  const size = Math.round(c.clientWidth * devicePixelRatio);
+  if (c.width !== size) c.width = c.height = size;
+
+  const lim = v => Math.max(-20, Math.min(20, v)), t = performance.now();
+  const push = ptr.down ? { x: ptr.x, y: ptr.y, r: 0.05, vx: lim((ptr.x - ptr.px) / (SUB * MPM.DT)), vy: lim((ptr.y - ptr.py) / (SUB * MPM.DT)) } : null;
+  ptr.px = ptr.x; ptr.py = ptr.y;
+  for (let i = 0; i < SUB; i++) MPM.step(push);
+  ms = ms * 0.9 + (performance.now() - t) * 0.1;
+
+  g.clearRect(0, 0, size, size);
+  const d = Math.max(2, size / 200);
+  for (let m = 0; m < 3; m++) {
+    g.fillStyle = COLORS[m];
+    for (let p = 0; p < MPM.n; p++) if (MPM.mat[p] === m) g.fillRect(MPM.x[p] * size - d / 2, (1 - MPM.y[p]) * size - d / 2, d, d);
+  }
+  $('n').textContent = MPM.n.toLocaleString('en'); $('sub').textContent = SUB; $('ms').textContent = ms.toFixed(1) + ' ms';
+  requestAnimationFrame(frame);
+}
+scene(); frame();
+</script>
+</html>

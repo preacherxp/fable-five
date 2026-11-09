@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>sql: a SQL engine in one JavaScript file</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7dce5; font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  body { display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid #232a3a; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0 8px 0 0; color: #fff; }
+  h1 span { color: #8b95a7; font-weight: 400; }
+  button { font: inherit; background: #131722; color: inherit; border: 1px solid #232a3a; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  #run { background: #f5a524; color: #0b0e14; border-color: #f5a524; font-weight: 700; }
+  a { color: #f5a524; margin-left: auto; }
+  main { display: grid; grid-template-columns: 5fr 6fr; min-height: 0; }
+  #left { display: grid; grid-template-rows: 1fr auto; border-right: 1px solid #232a3a; min-height: 0; }
+  textarea { background: #0b0e14; color: #d7dce5; border: 0; padding: 18px 20px; font: inherit; resize: none; outline: none; white-space: pre; }
+  #schema { border-top: 1px solid #232a3a; padding: 12px 20px; color: #8b95a7; }
+  #schema b { color: #d7dce5; font-weight: 400; }
+  #right { overflow: auto; padding: 18px 20px; }
+  #status { color: #f5a524; margin-bottom: 10px; }
+  #status.err { color: #fb7185; }
+  ol { margin: 0 0 16px; padding: 12px 16px 12px 40px; background: #131722; border: 1px solid #232a3a; border-radius: 8px; color: #8b95a7; }
+  ol:empty { display: none; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 14px; border-bottom: 1px solid #232a3a; white-space: nowrap; }
+  th { color: #8b95a7; font-weight: 400; }
+  td.num { text-align: right; } th.num { text-align: right; }
+  td.null { color: #6b7588; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } textarea { min-height: 40vh; } }
+</style>
+<header>
+  <h1>sql <span>joins, grouping and a query plan.</span></h1>
+  <button id="run">Run (Ctrl+Enter)</button>
+  <span id="examples"></span>
+  <a href="../">all five</a>
+</header>
+<main>
+  <div id="left"><textarea id="src" spellcheck="false" autocapitalize="off"></textarea><div id="schema"></div></div>
+  <div id="right"><div id="status"></div><ol id="plan"></ol><table id="result"></table></div>
+</main>
+<script src="sql.js"></script>
+<script>
+const EXAMPLES = {
+'revenue by city': `SELECT c.city,
+       COUNT(*) AS orders,
+       SUM(o.qty * o.price) AS revenue,
+       ROUND(AVG(o.qty * o.price), 2) AS avg_order
+FROM orders o
+JOIN customers c ON o.customer_id = c.id
+WHERE o.product LIKE '%board%' OR o.qty >= 4
+GROUP BY c.city
+HAVING COUNT(*) > 20
+ORDER BY revenue DESC
+LIMIT 5;`,
+'customers without orders': `SELECT c.name, c.city
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE o.id IS NULL
+ORDER BY c.name;`,
+'best sellers': `SELECT product,
+       SUM(qty) AS units,
+       COUNT(DISTINCT customer_id) AS buyers,
+       MIN(day) AS first_day,
+       MAX(day) AS last_day
+FROM orders
+WHERE day <= 90 AND product NOT IN ('usb hub')
+GROUP BY product
+ORDER BY units DESC;`,
+};
+
+// Demo data, generated with a fixed seed and loaded through the engine's own INSERT.
+const db = SQL.Database();
+let seed = 7;
+const rnd = n => (seed = seed * 1664525 + 1013904223 >>> 0) % n;
+const CITIES = ['Katowice', 'Berlin', 'Lisbon', 'Austin', 'Tokyo', 'Toronto'];
+const FIRST = ['Ada', 'Linus', 'Grace', 'Dennis', 'Barbara', 'Ken', 'Margaret', 'Bjarne', 'Radia', 'Guido'];
+const PRODUCTS = [['keyboard', 89], ['monitor', 329], ['webcam', 59], ['usb hub', 25], ['desk lamp', 45], ['whiteboard', 120]];
+const customers = Array.from({ length: 48 }, (_, i) => `(${i + 1}, '${FIRST[i % 10]} ${String.fromCharCode(65 + (i * 7) % 26)}.', '${CITIES[rnd(6)]}')`);
+const orders = Array.from({ length: 1000 }, (_, i) => { const [p, price] = PRODUCTS[rnd(6)]; return `(${i + 1}, ${1 + rnd(45)}, '${p}', ${1 + rnd(5)}, ${price}, ${1 + rnd(365)})`; });
+db.exec(`CREATE TABLE customers (id INT, name TEXT, city TEXT);
+CREATE TABLE orders (id INT, customer_id INT, product TEXT, qty INT, price INT, day INT);
+INSERT INTO customers VALUES ${customers.join(',')};
+INSERT INTO orders VALUES ${orders.join(',')};`);
+
+const $ = id => document.getElementById(id), src = $('src');
+const cell = (tag, v) => { const e = document.createElement(tag); e.textContent = v == null ? 'NULL' : v; if (typeof v === 'number') e.className = 'num'; if (v == null) e.className = 'null'; return e; };
+
+function run() {
+  const status = $('status'), table = $('result'), plan = $('plan');
+  table.replaceChildren(); plan.replaceChildren(); status.className = '';
+  try {
+    const t = performance.now(), res = db.exec(src.value).pop() || { message: 'nothing to run' }, ms = performance.now() - t;
+    if (!res.columns) { status.textContent = res.message; }
+    else {
+      status.textContent = `${res.rows.length} row${res.rows.length === 1 ? '' : 's'} in ${ms.toFixed(1)} ms`;
+      plan.append(...res.plan.map(s => cell('li', s)));
+      const head = table.insertRow();
+      res.columns.forEach((c, i) => { const th = cell('th', c); if (typeof (res.rows[0] || [])[i] === 'number') th.className = 'num'; head.append(th); });
+      for (const r of res.rows.slice(0, 500)) table.insertRow().append(...r.map(v => cell('td', v)));
+    }
+  } catch (e) { status.className = 'err'; status.textContent = e.message; }
+  $('schema').innerHTML = [...db.tables].map(([n, t]) => `<b>${n}</b> (${t.cols.join(', ')}) · ${t.rows.length} rows`).join('<br>');
+}
+
+for (const name in EXAMPLES) { const b = document.createElement('button'); b.textContent = name; b.onclick = () => { src.value = EXAMPLES[name]; run(); }; $('examples').append(b, ' '); }
+$('run').onclick = run;
+src.onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } };
+src.value = EXAMPLES['revenue by city'];
+run();
+</script>
+</html>

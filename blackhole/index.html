@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Black hole: a Schwarzschild ray tracer in one fragment shader</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace; color: #cbd5e1; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+  #hud { position: fixed; left: 28px; bottom: 24px; text-shadow: 0 1px 6px #000; }
+  #hud b { display: block; font-size: 20px; color: #fff; }
+  a { color: #f5a524; }
+</style>
+<canvas id="c"></canvas>
+<div id="hud"><b>Schwarzschild black hole</b>
+  every pixel integrates a photon geodesic through curved spacetime · <span id="fps">–</span> fps · drag to orbit · <a href="../">all five</a></div>
+<script>
+// Units: Schwarzschild radius rs = 1, c = 1. Light follows  x'' = -1.5 h² x / r⁵  (h = angular momentum),
+// which is the exact null geodesic equation of the Schwarzschild metric written as a force law.
+const FS = `
+precision highp float;
+uniform vec2 R; uniform float T; uniform vec2 C;
+
+float hash(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
+float noise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x), f.y); }
+float fbm(vec2 p){ float a=.5, s=0.; for(int i=0;i<5;i++){ s+=a*noise(p); p=p*2.03+17.; a*=.5; } return s; }
+
+vec3 stars(vec3 d){
+  vec2 uv=vec2(atan(d.z,d.x), asin(clamp(d.y,-1.,1.)));
+  vec3 c=vec3(0.);
+  for(int k=0;k<3;k++){
+    vec2 g=uv*(30.+float(k)*45.), id=floor(g), f=fract(g)-.5;
+    float h=hash(id+float(k)*31.7);
+    vec2 o=(vec2(hash(id+5.1),hash(id+9.7))-.5)*.7;
+    c+=smoothstep(.9,1.,h)*mix(vec3(1.,.75,.55),vec3(.65,.8,1.),hash(id+2.3))*(1.-smoothstep(0.,.1,length(f-o)))*2.;
+  }
+  return c+vec3(.35,.4,.7)*pow(fbm(d.xz*2.5+d.y*1.5),4.)*.6*exp(-d.y*d.y*8.);
+}
+
+// Gas pattern sheared by Keplerian rotation (omega ~ r^-1.5). Two phases are blended so it never winds up.
+float swirl(vec2 q,float r,float t){
+  float a=-t*5.*pow(r,-1.5), c=cos(a), s=sin(a);
+  return fbm(mat2(c,s,-s,c)*q*.9)*.6+fbm(vec2(r*2.6,3.))*.4;
+}
+
+vec4 disk(vec3 p,vec3 v){
+  float r=length(p.xz);
+  if(r<3.||r>16.) return vec4(0.);                       // inner edge = innermost stable circular orbit, 3 rs
+  float cyc=fract(T/20.), w=1.-abs(2.*cyc-1.);
+  float n=mix(swirl(p.xz,r,fract(cyc+.5)*20.), swirl(p.xz,r,cyc*20.), w);
+  float dens=smoothstep(3.,3.6,r)*(1.-smoothstep(9.,16.,r))*(.25+.75*smoothstep(.3,.7,n));
+  float beta=sqrt(.5/(r-1.)), gam=1./sqrt(1.-beta*beta);  // orbital speed of the gas, 0.5c at the inner edge
+  float g=sqrt(1.-1./r)/(gam*(1.+beta*dot(vec3(-p.z,0.,p.x)/r,v)));  // Doppler shift x gravitational redshift
+  float temp=pow(3./r,.75)*g;
+  vec3 col=mix(vec3(1.,.25,.04),vec3(1.,.85,.6),smoothstep(.2,.9,temp));
+  col=mix(col,vec3(.8,.9,1.),smoothstep(.9,1.6,temp));
+  return vec4(col*pow(g,3.)*pow(3./r,1.5)*7., dens);      // relativistic beaming: intensity ~ g³
+}
+
+void main(){
+  vec2 uv=(gl_FragCoord.xy*2.-R)/R.y;
+  uv=mat2(.9888,.1494,-.1494,.9888)*uv;
+  float cy=cos(C.x), sy=sin(C.x), cp=cos(C.y), sp=sin(C.y);
+  vec3 p=24.*vec3(cp*sy,sp,cp*cy);
+  vec3 f=normalize(-p), rt=normalize(cross(f,vec3(0.,1.,0.))), up=cross(rt,f);
+  vec3 v=normalize(f*1.7+uv.x*rt+uv.y*up);
+  vec3 hv=cross(p,v); float h2=dot(hv,hv);
+  vec3 col=vec3(0.); float tr=1.; bool escaped=false;
+  for(int i=0;i<300;i++){
+    float r2=dot(p,p);
+    if(r2<1.) break;                                       // fell through the event horizon
+    if(r2>700.&&dot(p,v)>0.){ escaped=true; break; }
+    float dt=.045*sqrt(r2);
+    v+=-1.5*h2*p/(r2*r2*sqrt(r2))*dt;
+    vec3 np=p+v*dt;
+    if(p.y*np.y<0.){                                       // crossed the disk plane
+      vec4 d=disk(mix(p,np,p.y/(p.y-np.y)),normalize(v));
+      col+=tr*d.rgb*d.a; tr*=1.-d.a;
+    }
+    p=np;
+  }
+  if(escaped) col+=tr*stars(normalize(v));
+  gl_FragColor=vec4(pow(1.-exp(-col*1.4),vec3(.4545)),1.);
+}`;
+
+const c = document.getElementById('c'), gl = c.getContext('webgl');
+if (!gl) document.getElementById('hud').textContent = 'This needs WebGL.';
+const shader = (type, src) => {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+};
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, 'attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}'));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+gl.bindAttribLocation(prog, 0, 'p'); gl.linkProgram(prog); gl.useProgram(prog);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n), uR = U('R'), uT = U('T'), uC = U('C');
+
+let yaw = 0.6, pitch = 0.09, drag = null;
+c.onpointerdown = e => { drag = [e.clientX, e.clientY]; c.setPointerCapture(e.pointerId); };
+c.onpointerup = () => drag = null;
+c.onpointermove = e => {
+  if (!drag) return;
+  yaw -= (e.clientX - drag[0]) * 0.005;
+  pitch = Math.max(-1.4, Math.min(1.4, pitch + (e.clientY - drag[1]) * 0.005));
+  drag = [e.clientX, e.clientY];
+};
+
+let last = performance.now(), frames = 0, since = last;
+function frame(now) {
+  const s = Math.min(devicePixelRatio, 1.5), w = innerWidth * s | 0, h = innerHeight * s | 0;
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; gl.viewport(0, 0, w, h); }
+  if (!drag) yaw += (now - last) * 0.00003;
+  last = now;
+  gl.uniform2f(uR, w, h); gl.uniform1f(uT, now / 1000); gl.uniform2f(uC, yaw, pitch);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (++frames && now - since > 500) { document.getElementById('fps').textContent = Math.round(frames * 1000 / (now - since)); frames = 0; since = now; }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</html>
