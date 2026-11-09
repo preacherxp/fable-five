@@ -2,23 +2,30 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Black hole: a Schwarzschild ray tracer in one fragment shader</title>
+<title>Black hole: a Kerr ray tracer in one fragment shader</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace; color: #cbd5e1; }
   canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
   #hud { position: fixed; left: 28px; bottom: 24px; text-shadow: 0 1px 6px #000; }
   #hud b { display: block; font-size: 20px; color: #fff; }
+  label { display: flex; align-items: center; gap: 12px; margin: 6px 0 2px; color: #fff; }
+  input { width: 240px; accent-color: #f5a524; }
   a { color: #f5a524; }
 </style>
 <canvas id="c"></canvas>
-<div id="hud"><b>Schwarzschild black hole</b>
-  every pixel integrates a photon geodesic through curved spacetime · <span id="fps">–</span> fps · drag to orbit · <a href="../">all five</a></div>
+<div id="hud"><b>Rotating black hole</b>
+  <label>spin a = <span id="spinv"></span> <input id="spin" type="range" min="0" max="0.998" step="0.001" value="0.95" aria-label="spin"></label>
+  every pixel integrates a photon geodesic of the Kerr metric · <span id="fps">–</span> fps · drag to orbit · <a href="../">all five</a></div>
+<script src="kerr.js"></script>
 <script>
-// Units: Schwarzschild radius rs = 1, c = 1. Light follows  x'' = -1.5 h² x / r⁵  (h = angular momentum),
-// which is the exact null geodesic equation of the Schwarzschild metric written as a force law.
+// Rays are followed from the camera into the scene. A ray that really arrives at the camera, run backwards, is a
+// photon leaving the camera in the time-reversed spacetime: same hole, opposite spin, gas orbiting the other way.
+// So the shader integrates forward in time with spin -a, which keeps the ingoing Kerr-Schild coordinates regular
+// for exactly the rays that fall in. kerr.js holds the equations; test.js checks them against closed-form Kerr.
 const FS = `
 precision highp float;
 uniform vec2 R; uniform float T; uniform vec2 C;
+uniform vec3 S;                                          // spin a, inner edge of the disk (ISCO), horizon radius
 
 float hash(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
 float noise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
@@ -37,54 +44,68 @@ vec3 stars(vec3 d){
   return c+vec3(.35,.4,.7)*pow(fbm(d.xz*2.5+d.y*1.5),4.)*.6*exp(-d.y*d.y*8.);
 }
 
-// Gas pattern sheared by Keplerian rotation (omega ~ r^-1.5). Two phases are blended so it never winds up.
+void rhs(vec3 x, vec3 p, float a, out vec3 dx, out vec3 dp){ ${KERR.RHS} }
+float nullk(vec3 x, vec3 n, float a){ ${KERR.NULLK}
+  return k; }
+
+// Gas pattern sheared by the orbital rotation. Two phases are blended so it never winds up.
 float swirl(vec2 q,float r,float t){
-  float a=-t*5.*pow(r,-1.5), c=cos(a), s=sin(a);
-  return fbm(mat2(c,s,-s,c)*q*.9)*.6+fbm(vec2(r*2.6,3.))*.4;
+  float ang=-t*14./(pow(r,1.5)+S.x), c=cos(ang), s=sin(ang);
+  return fbm(mat2(c,s,-s,c)*q*.45)*.6+fbm(vec2(r*1.3,3.))*.4;
 }
 
-vec4 disk(vec3 p,vec3 v){
-  float r=length(p.xz);
-  if(r<3.||r>16.) return vec4(0.);                       // inner edge = innermost stable circular orbit, 3 rs
+// q: where the ray crossed the equatorial plane. lz: the ray's angular momentum about the spin axis (conserved).
+vec4 disk(vec2 q,float lz){
+  float r=sqrt(max(dot(q,q)-S.x*S.x,0.));
+  if(r<S.y||r>26.) return vec4(0.);
   float cyc=fract(T/20.), w=1.-abs(2.*cyc-1.);
-  float n=mix(swirl(p.xz,r,fract(cyc+.5)*20.), swirl(p.xz,r,cyc*20.), w);
-  float dens=smoothstep(3.,3.6,r)*(1.-smoothstep(9.,16.,r))*(.25+.75*smoothstep(.3,.7,n));
-  float beta=sqrt(.5/(r-1.)), gam=1./sqrt(1.-beta*beta);  // orbital speed of the gas, 0.5c at the inner edge
-  float g=sqrt(1.-1./r)/(gam*(1.+beta*dot(vec3(-p.z,0.,p.x)/r,v)));  // Doppler shift x gravitational redshift
-  float temp=pow(3./r,.75)*g;
+  float n=mix(swirl(q,r,fract(cyc+.5)*20.), swirl(q,r,cyc*20.), w);
+  float dens=smoothstep(S.y,S.y*1.12+.25,r)*(1.-smoothstep(14.,26.,r))*(.25+.75*smoothstep(.3,.7,n));
+  float r15=pow(r,1.5), om=1./(r15+S.x);                 // angular velocity of a circular orbit
+  float ut=(1.+S.x/r15)/sqrt(1.-3./r+2.*S.x/r15);        // its time dilation
+  float g=1./(ut*(1.+om*lz));                            // observed / emitted frequency: Doppler and gravity in one
+  float temp=pow(6./r,.75)*g;
   vec3 col=mix(vec3(1.,.25,.04),vec3(1.,.85,.6),smoothstep(.2,.9,temp));
   col=mix(col,vec3(.8,.9,1.),smoothstep(.9,1.6,temp));
-  return vec4(col*pow(g,3.)*pow(3./r,1.5)*7., dens);      // relativistic beaming: intensity ~ g³
+  return vec4(col*pow(g,3.)*pow(6./(r+2.),1.5)*11., dens); // relativistic beaming: intensity ~ g³
 }
 
 void main(){
   vec2 uv=(gl_FragCoord.xy*2.-R)/R.y;
   uv=mat2(.9888,.1494,-.1494,.9888)*uv;
   float cy=cos(C.x), sy=sin(C.x), cp=cos(C.y), sp=sin(C.y);
-  vec3 p=24.*vec3(cp*sy,sp,cp*cy);
-  vec3 f=normalize(-p), rt=normalize(cross(f,vec3(0.,1.,0.))), up=cross(rt,f);
-  vec3 v=normalize(f*1.7+uv.x*rt+uv.y*up);
-  vec3 hv=cross(p,v); float h2=dot(hv,hv);
+  vec3 x=40.*vec3(cp*cy,cp*sy,sp);                       // camera 40 M out, spin axis is z
+  vec3 f=normalize(-x), rt=normalize(cross(f,vec3(0.,0.,1.))), up=cross(rt,f);
+  vec3 n=normalize(f*1.7+uv.x*rt+uv.y*up);
+  float a=-S.x;                                          // time-reversed spacetime, see above
+  vec3 p=nullk(x,n,a)*n, v=n;
+  float lz=x.x*p.y-x.y*p.x;
   vec3 col=vec3(0.); float tr=1.; bool escaped=false;
-  for(int i=0;i<300;i++){
-    float r2=dot(p,p);
-    if(r2<1.) break;                                       // fell through the event horizon
-    if(r2>700.&&dot(p,v)>0.){ escaped=true; break; }
-    float dt=.045*sqrt(r2);
-    v+=-1.5*h2*p/(r2*r2*sqrt(r2))*dt;
-    vec3 np=p+v*dt;
-    if(p.y*np.y<0.){                                       // crossed the disk plane
-      vec4 d=disk(mix(p,np,p.y/(p.y-np.y)),normalize(v));
+  vec3 k1x,k1p,k2x,k2p,k3x,k3p,k4x,k4p;
+  for(int i=0;i<160;i++){
+    float s=dot(x,x)-a*a, r=sqrt(.5*(s+sqrt(s*s+4.*a*a*x.z*x.z)));
+    if(r<S.z) break;                                     // through the event horizon
+    rhs(x,p,a,k1x,k1p);
+    if(r>50.&&dot(x,k1x)>0.){ escaped=true; v=k1x; break; }
+    float h=.11*r*clamp((r-S.z)*.3+.1,.1,1.);            // Runge-Kutta 4, shorter steps close to the hole
+    rhs(x+.5*h*k1x,p+.5*h*k1p,a,k2x,k2p);
+    rhs(x+.5*h*k2x,p+.5*h*k2p,a,k3x,k3p);
+    rhs(x+h*k3x,p+h*k3p,a,k4x,k4p);
+    vec3 nx=x+h/6.*(k1x+2.*k2x+2.*k3x+k4x);
+    p+=h/6.*(k1p+2.*k2p+2.*k3p+k4p);
+    if(x.z*nx.z<0.){                                     // crossed the disk plane
+      vec4 d=disk(mix(x.xy,nx.xy,x.z/(x.z-nx.z)),lz);
       col+=tr*d.rgb*d.a; tr*=1.-d.a;
+      if(tr<.01) break;
     }
-    p=np;
+    x=nx;
   }
-  if(escaped) col+=tr*stars(normalize(v));
+  if(escaped) col+=tr*stars(normalize(v).xzy);
   gl_FragColor=vec4(pow(1.-exp(-col*1.4),vec3(.4545)),1.);
 }`;
 
-const c = document.getElementById('c'), gl = c.getContext('webgl');
-if (!gl) document.getElementById('hud').textContent = 'This needs WebGL.';
+const $ = id => document.getElementById(id), c = $('c'), gl = c.getContext('webgl');
+if (!gl) $('hud').textContent = 'This needs WebGL.';
 const shader = (type, src) => {
   const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
@@ -97,7 +118,7 @@ gl.bindAttribLocation(prog, 0, 'p'); gl.linkProgram(prog); gl.useProgram(prog);
 gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
 gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-const U = n => gl.getUniformLocation(prog, n), uR = U('R'), uT = U('T'), uC = U('C');
+const U = n => gl.getUniformLocation(prog, n), uR = U('R'), uT = U('T'), uC = U('C'), uS = U('S');
 
 let yaw = 0.6, pitch = 0.09, drag = null;
 c.onpointerdown = e => { drag = [e.clientX, e.clientY]; c.setPointerCapture(e.pointerId); };
@@ -108,16 +129,29 @@ c.onpointermove = e => {
   pitch = Math.max(-1.4, Math.min(1.4, pitch + (e.clientY - drag[1]) * 0.005));
   drag = [e.clientX, e.clientY];
 };
+const setSpin = () => {
+  const a = +$('spin').value;
+  $('spinv').textContent = a.toFixed(3);
+  gl.uniform3f(uS, a, KERR.isco(a), KERR.horizon(a));
+};
+if (location.hash) $('spin').value = location.hash.slice(1);   // blackhole/#0.5 opens at spin 0.5
+$('spin').oninput = setSpin; setSpin();
 
-let last = performance.now(), frames = 0, since = last;
+// Render scale drops when the GPU can't hold the frame rate (the first window is skipped: it includes shader compile).
+let scale = Math.min(devicePixelRatio, 1.5), last = performance.now(), frames = 0, since = last, windows = 0;
 function frame(now) {
-  const s = Math.min(devicePixelRatio, 1.5), w = innerWidth * s | 0, h = innerHeight * s | 0;
+  const w = innerWidth * scale | 0, h = innerHeight * scale | 0;
   if (c.width !== w || c.height !== h) { c.width = w; c.height = h; gl.viewport(0, 0, w, h); }
   if (!drag) yaw += (now - last) * 0.00003;
   last = now;
   gl.uniform2f(uR, w, h); gl.uniform1f(uT, now / 1000); gl.uniform2f(uC, yaw, pitch);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  if (++frames && now - since > 500) { document.getElementById('fps').textContent = Math.round(frames * 1000 / (now - since)); frames = 0; since = now; }
+  if (++frames && now - since > 500) {
+    const fps = frames * 1000 / (now - since);
+    $('fps').textContent = Math.round(fps);
+    if (windows++ && fps < 45 && scale > 0.5) scale = Math.max(0.5, scale * 0.85);
+    frames = 0; since = now;
+  }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

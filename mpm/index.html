@@ -2,12 +2,12 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MLS-MPM: water, jelly and snow in one solver</title>
+<title>MLS-MPM in 3D: water, jelly and snow in one solver</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7dce5; font: 14px/1.6 ui-monospace, Menlo, Consolas, monospace; }
   main { display: flex; gap: 28px; height: 100%; padding: 24px; align-items: center; justify-content: center; }
-  canvas { height: min(calc(100vh - 48px), calc(100vw - 48px)); aspect-ratio: 1; background: #05070b; border: 1px solid #232a3a; border-radius: 8px; touch-action: none; cursor: crosshair; }
+  canvas { height: min(calc(100vh - 48px), calc(100vw - 48px)); aspect-ratio: 1; background: #05070b; border: 1px solid #232a3a; border-radius: 8px; touch-action: none; cursor: grab; }
   aside { width: 330px; }
   h1 { font-size: 20px; margin: 0 0 8px; color: #fff; }
   p { color: #8b95a7; margin: 0 0 18px; }
@@ -21,17 +21,18 @@
 <main>
   <canvas id="c"></canvas>
   <aside>
-    <h1>Water, jelly and snow</h1>
-    <p>One solver for all three: the moving least squares material point method. Particles carry mass and deformation, a grid resolves the collisions. Drag through it.</p>
+    <h1>Water, jelly and snow in 3D</h1>
+    <p>One solver for all three: the moving least squares material point method. Particles carry mass and a 3×3 deformation, a 3D grid resolves the collisions. Plain JavaScript on one thread. Drag to orbit.</p>
     <div>
       <button data-m="0"><i style="background:#38bdf8"></i>Water</button>
       <button data-m="1"><i style="background:#fb7185"></i>Jelly</button>
       <button data-m="2"><i style="background:#f1f5f9"></i>Snow</button>
+      <button id="shake">Shake</button>
       <button id="reset">Reset</button>
     </div>
     <dl>
       <dt>particles</dt><dd id="n">–</dd>
-      <dt>grid</dt><dd>80 × 80</dd>
+      <dt>grid</dt><dd id="grid">–</dd>
       <dt>steps per frame</dt><dd id="sub">–</dd>
       <dt>physics per frame</dt><dd id="ms">–</dd>
     </dl>
@@ -40,46 +41,104 @@
 </main>
 <script src="sim.js"></script>
 <script>
-const $ = id => document.getElementById(id), c = $('c'), g = c.getContext('2d');
-const COLORS = ['#38bdf8', '#fb7185', '#f1f5f9'], SUB = 12, PER_CELL = 6;
-const block = (x, y, half, m) => MPM.addBlock(x, y, half, m, Math.round((2 * half * MPM.N) ** 2 * PER_CELL));
+const $ = id => document.getElementById(id), c = $('c'), gl = c.getContext('webgl', { antialias: true });
+const SUB = 4, PER_CELL = 8, RADIUS = 0.0125, FL = 3.1, LO = MPM.WALL / MPM.N, HI = 1 - LO;   // FL: focal length, 36° field of view
 
+// Particles are point sprites shaded as spheres. With S = 0 the same program draws the flat box and floor.
+const VS = `attribute vec3 p; attribute float m; uniform mat4 M; uniform mediump float S; varying vec3 col;
+void main() {
+  gl_Position = M * vec4(p, 1.);
+  gl_PointSize = S / gl_Position.w;
+  col = m < .5 ? vec3(.22, .74, .97) : m < 1.5 ? vec3(.98, .44, .52) : vec3(.95, .96, .98);
+}`;
+const FS = `precision mediump float; varying vec3 col; uniform float S; uniform vec3 K;
+void main() {
+  if (S == 0.) { gl_FragColor = vec4(K, 1.); return; }
+  vec2 q = gl_PointCoord * 2. - 1.;
+  float r2 = dot(q, q);
+  if (r2 > 1.) discard;
+  vec3 n = vec3(q.x, -q.y, sqrt(1. - r2));
+  float diffuse = max(dot(n, normalize(vec3(.45, .75, .5))), 0.), spec = pow(max(dot(n, normalize(vec3(.3, .5, 1.))), 0.), 30.);
+  gl_FragColor = vec4(col * (.3 + .8 * diffuse) + .2 * spec, 1.);
+}`;
+const shader = (type, src) => {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+};
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+gl.bindAttribLocation(prog, 0, 'p'); gl.bindAttribLocation(prog, 1, 'm');
+gl.linkProgram(prog); gl.useProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+const U = name => gl.getUniformLocation(prog, name), uM = U('M'), uS = U('S'), uK = U('K');
+gl.enable(gl.DEPTH_TEST); gl.clearColor(0.02, 0.027, 0.043, 1); gl.enableVertexAttribArray(0);
+
+// Static scenery: a floor (2 triangles), then lines for the floor grid and the 12 edges of the box.
+const y0 = LO - RADIUS, scenery = [LO, y0, LO, HI, y0, LO, HI, y0, HI, LO, y0, LO, HI, y0, HI, LO, y0, HI];
+for (let i = 0; i <= 8; i++) { const t = LO + (HI - LO) * i / 8; scenery.push(t, y0, LO, t, y0, HI, LO, y0, t, HI, y0, t); }
+for (const a of [LO, HI]) for (const b of [LO, HI]) scenery.push(a, y0, b, a, HI, b, a, HI, LO, a, HI, HI, LO, HI, a, HI, HI, a);
+const sceneBuf = gl.createBuffer(), posBuf = gl.createBuffer(), matBuf = gl.createBuffer(), xyz = new Float32Array(3 * MPM.MAX);
+gl.bindBuffer(gl.ARRAY_BUFFER, sceneBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(scenery), gl.STATIC_DRAW);
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuf); gl.bufferData(gl.ARRAY_BUFFER, xyz, gl.DYNAMIC_DRAW);
+gl.bindBuffer(gl.ARRAY_BUFFER, matBuf); gl.bufferData(gl.ARRAY_BUFFER, MPM.mat, gl.DYNAMIC_DRAW);
+
+// View-projection matrix (column-major) of a camera orbiting the middle of the box.
+let yaw = 0.62, pitch = 0.36, drag = null;
+const M = new Float32Array(16), dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function camera() {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch), D = 2.35, near = 0.5, far = 6;
+  const f = [-cp * sy, -sp, -cp * cy], r = [cy, 0, -sy], u = [-sy * sp, cp, -cy * sp], e = [0.5 - D * f[0], 0.43 - D * f[1], 0.5 - D * f[2]];
+  const row = (k, a, s) => { M[k] = s * a[0]; M[4 + k] = s * a[1]; M[8 + k] = s * a[2]; M[12 + k] = -s * dot(a, e); };
+  row(0, r, FL); row(1, u, FL); row(2, f, (far + near) / (far - near)); M[14] += 2 * far * near / (near - far); row(3, f, 1);
+}
+c.onpointerdown = e => { drag = [e.clientX, e.clientY]; c.setPointerCapture(e.pointerId); };
+c.onpointerup = () => drag = null;
+c.onpointermove = e => {
+  if (!drag) return;
+  yaw -= (e.clientX - drag[0]) * 0.008; pitch = Math.max(0.03, Math.min(1.45, pitch + (e.clientY - drag[1]) * 0.008));
+  drag = [e.clientX, e.clientY];
+};
+
+const block = (x, y, z, hx, hy, hz, m) => MPM.addBlock(x, y, z, hx, hy, hz, m, Math.round(8 * hx * hy * hz * MPM.N ** 3 * PER_CELL));
 function scene() {
   MPM.reset();
-  block(0.24, 0.44, 0.17, MPM.WATER);
-  block(0.56, 0.76, 0.11, MPM.JELLY);
-  block(0.79, 0.4, 0.12, MPM.SNOW);
+  block(0.23, 0.23, 0.5, 0.12, 0.12, 0.2, MPM.WATER);      // a dam that breaks towards the other two
+  block(0.6, 0.8, 0.46, 0.1, 0.1, 0.1, MPM.JELLY);       // lands on the snow after it has hit the floor
+  block(0.72, 0.5, 0.58, 0.11, 0.11, 0.11, MPM.SNOW);
 }
-
-const ptr = { x: 0, y: 0, px: 0, py: 0, down: false };
-const at = e => { const r = c.getBoundingClientRect(); ptr.x = (e.clientX - r.left) / r.width; ptr.y = 1 - (e.clientY - r.top) / r.height; };
-c.onpointerdown = e => { at(e); ptr.px = ptr.x; ptr.py = ptr.y; ptr.down = true; c.setPointerCapture(e.pointerId); };
-c.onpointermove = at;
-c.onpointerup = () => ptr.down = false;
-
-document.querySelectorAll('[data-m]').forEach(b => b.onclick = () => block(0.3 + Math.random() * 0.4, 0.82, 0.07, +b.dataset.m));
+document.querySelectorAll('[data-m]').forEach(b => b.onclick = () => block(0.3 + Math.random() * 0.4, 0.78, 0.3 + Math.random() * 0.4, 0.08, 0.08, 0.08, +b.dataset.m));
+$('shake').onclick = () => {
+  const a = Math.random() * 6.28, x = 7 * Math.cos(a), z = 7 * Math.sin(a);
+  for (let p = 0; p < MPM.n; p++) { MPM.vel[3 * p] += x; MPM.vel[3 * p + 1] += 9; MPM.vel[3 * p + 2] += z; }
+};
 $('reset').onclick = scene;
 
 let ms = 0;
 function frame() {
-  const size = Math.round(c.clientWidth * devicePixelRatio);
-  if (c.width !== size) c.width = c.height = size;
+  const size = Math.round(c.clientWidth * devicePixelRatio), t = performance.now(), n = MPM.n;
+  if (c.width !== size) { c.width = c.height = size; gl.viewport(0, 0, size, size); }
+  for (let i = 0; i < SUB; i++) MPM.step();
+  ms = ms ? ms * 0.9 + (performance.now() - t) * 0.1 : performance.now() - t;
 
-  const lim = v => Math.max(-20, Math.min(20, v)), t = performance.now();
-  const push = ptr.down ? { x: ptr.x, y: ptr.y, r: 0.05, vx: lim((ptr.x - ptr.px) / (SUB * MPM.DT)), vy: lim((ptr.y - ptr.py) / (SUB * MPM.DT)) } : null;
-  ptr.px = ptr.x; ptr.py = ptr.y;
-  for (let i = 0; i < SUB; i++) MPM.step(push);
-  ms = ms * 0.9 + (performance.now() - t) * 0.1;
+  camera();
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.uniformMatrix4fv(uM, false, M);
+  gl.uniform1f(uS, 0); gl.disableVertexAttribArray(1);
+  gl.bindBuffer(gl.ARRAY_BUFFER, sceneBuf); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.uniform3f(uK, 0.045, 0.058, 0.09); gl.drawArrays(gl.TRIANGLES, 0, 6);
+  gl.uniform3f(uK, 0.22, 0.27, 0.4); gl.drawArrays(gl.LINES, 6, scenery.length / 3 - 6);
 
-  g.clearRect(0, 0, size, size);
-  const d = Math.max(2, size / 200);
-  for (let m = 0; m < 3; m++) {
-    g.fillStyle = COLORS[m];
-    for (let p = 0; p < MPM.n; p++) if (MPM.mat[p] === m) g.fillRect(MPM.x[p] * size - d / 2, (1 - MPM.y[p]) * size - d / 2, d, d);
-  }
-  $('n').textContent = MPM.n.toLocaleString('en'); $('sub').textContent = SUB; $('ms').textContent = ms.toFixed(1) + ' ms';
+  xyz.set(MPM.pos.subarray(0, 3 * n));
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, xyz.subarray(0, 3 * n)); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, matBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, MPM.mat.subarray(0, n)); gl.vertexAttribPointer(1, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+  gl.enableVertexAttribArray(1);
+  gl.uniform1f(uS, RADIUS * FL * size); gl.drawArrays(gl.POINTS, 0, n);
+
+  $('n').textContent = n.toLocaleString('en'); $('sub').textContent = SUB; $('ms').textContent = ms.toFixed(1) + ' ms';
   requestAnimationFrame(frame);
 }
+$('grid').textContent = `${MPM.N} × ${MPM.N} × ${MPM.N}`;
 scene(); frame();
 </script>
 </html>

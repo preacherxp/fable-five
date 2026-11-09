@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>cc: a C-subset compiler to WebAssembly, in the browser</title>
+<title>cc: a C compiler to WebAssembly, in the browser</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7dce5; font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; }
@@ -12,59 +12,189 @@
   h1 span { color: #8b95a7; font-weight: 400; }
   select, button { font: inherit; background: #131722; color: inherit; border: 1px solid #232a3a; border-radius: 6px; padding: 6px 12px; }
   button { background: #4ade80; color: #0b0e14; border-color: #4ade80; font-weight: 700; cursor: pointer; }
-  #status { margin-left: auto; color: #8b95a7; }
-  #status.err { color: #fb7185; }
-  a { color: #4ade80; }
+  a { color: #4ade80; margin-left: auto; }
   main { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
   textarea { background: #0b0e14; color: #d7dce5; border: 0; border-right: 1px solid #232a3a; padding: 18px 20px; font: inherit; resize: none; outline: none; tab-size: 2; white-space: pre; }
-  #right { display: grid; grid-template-rows: 1fr 190px; min-height: 0; }
-  pre { margin: 0; padding: 18px 20px; overflow: auto; }
+  #right { display: grid; grid-template-rows: auto 1fr 150px; min-height: 0; min-width: 0; }
+  #status { padding: 10px 20px; border-bottom: 1px solid #232a3a; color: #8b95a7; font-size: 13px; }
+  #status.err { color: #fb7185; }
+  #result { overflow: auto; padding: 16px 20px; }
+  canvas { display: block; max-width: 100%; border-radius: 6px; margin-bottom: 12px; }
+  pre { margin: 0; }
   #out { color: #4ade80; line-height: 1.15; }
-  #hex { border-top: 1px solid #232a3a; color: #6b7588; font-size: 12px; }
+  #hex { border-top: 1px solid #232a3a; color: #6b7588; font-size: 12px; padding: 14px 20px; overflow: auto; }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; } textarea { min-height: 50vh; border-right: 0; } }
 </style>
 <header>
-  <h1>cc <span>C in, WebAssembly bytes out.</span></h1>
+  <h1>cc <span>C in, WebAssembly bytes out. Structs, pointers, doubles.</span></h1>
   <select id="ex"></select>
   <button id="run">Run (Ctrl+Enter)</button>
-  <span id="status"></span>
   <a href="../">all five</a>
 </header>
 <main>
   <textarea id="src" spellcheck="false" autocapitalize="off"></textarea>
-  <div id="right"><pre id="out"></pre><pre id="hex"></pre></div>
+  <div id="right">
+    <div id="status"></div>
+    <div id="result"><canvas id="cv" hidden></canvas><pre id="out"></pre></div>
+    <pre id="hex"></pre>
+  </div>
 </main>
 <script src="cc.js"></script>
 <script>
 const EXAMPLES = {
-'mandelbrot.c': `// Mandelbrot set in fixed-point integers.
-// Compiled to WebAssembly by a compiler running in this tab.
+'raytracer.c': `// A ray tracer in C: structs, pointers, doubles, recursion.
+// The compiler that turns it into WebAssembly runs in this tab.
+#define W 640
+#define H 400
 
-int mandel(int cr, int ci) {
-  int zr = 0, zi = 0, i = 0;
-  while (i < 60) {
-    int zr2 = zr * zr >> 12, zi2 = zi * zi >> 12;
-    if (zr2 + zi2 > 4 << 12) break;
-    zi = (zr * zi >> 11) + ci;
-    zr = zr2 - zi2 + cr;
+struct vec { double x, y, z; };
+struct sphere {
+  struct vec c;
+  double r;
+  struct vec color;
+  double mirror;
+};
+
+struct sphere scene[3] = {
+  {{ 0.0, 1.0, 4.0}, 1.0, {1.0, 0.3, 0.2}, 0.25},
+  {{-2.1, 0.7, 5.2}, 0.7, {0.2, 0.9, 0.5}, 0.2},
+  {{ 1.8, 0.6, 3.0}, 0.6, {0.9, 0.9, 1.0}, 0.8},
+};
+struct vec light = {-1.0, 0.8, 0.15};
+
+double dot(struct vec *a, struct vec *b) {
+  return a->x * b->x + a->y * b->y + a->z * b->z;
+}
+
+// out = a + s * b
+void axpy(struct vec *out, struct vec *a, double s, struct vec *b) {
+  out->x = a->x + s * b->x;
+  out->y = a->y + s * b->y;
+  out->z = a->z + s * b->z;
+}
+
+void unit(struct vec *v) {
+  double n = sqrt(dot(v, v));
+  v->x /= n; v->y /= n; v->z /= n;
+}
+
+// The nearest sphere along the ray o + t * d, or 0.
+// The distance t is written to *dist.
+struct sphere *hit(struct vec *o, struct vec *d, double *dist) {
+  struct sphere *best = 0, *s;
+  *dist = 1e9;
+  for (s = scene; s < scene + 3; s++) {
+    struct vec oc;
+    axpy(&oc, o, -1.0, &s->c);
+    double b = dot(&oc, d);
+    double disc = b * b - dot(&oc, &oc) + s->r * s->r;
+    if (disc < 0.0) continue;
+    double t = -b - sqrt(disc);
+    if (t > 0.001 && t < *dist) { *dist = t; best = s; }
+  }
+  return best;
+}
+
+// The colour seen along a ray, with up to \`depth\` mirror bounces.
+void trace(struct vec *o, struct vec *d, int depth,
+           struct vec *out) {
+  struct vec p, n, base, r, seen;
+  double t, far, mirror = 0.2, shade;
+  struct sphere *s = hit(o, d, &t);
+  double floor_t = d->y < 0.0 ? -o->y / d->y : 1e9;
+
+  if (!s && floor_t > 60.0) {                    // sky
+    double k = d->y > 0.0 ? d->y : 0.0;
+    out->x = 0.55 - 0.4 * k;
+    out->y = 0.7 - 0.35 * k;
+    out->z = 1.0 - 0.2 * k;
+    return;
+  }
+  if (s && t < floor_t) {                        // a sphere
+    axpy(&p, o, t, d);
+    axpy(&n, &p, -1.0, &s->c);
+    unit(&n);
+    base = s->color;
+    mirror = s->mirror;
+  } else {                                       // the floor
+    axpy(&p, o, floor_t, d);
+    n.x = 0.0; n.y = 1.0; n.z = 0.0;
+    int odd = ((int)floor(p.x) + (int)floor(p.z)) & 1;
+    base.x = base.y = base.z = odd ? 0.85 : 0.2;
+  }
+
+  shade = dot(&n, &light);
+  // facing away from the light, or something is in the way
+  if (shade < 0.0 || hit(&p, &light, &far)) shade = 0.0;
+  shade = 0.12 + 0.88 * shade;
+  out->x = base.x * shade;
+  out->y = base.y * shade;
+  out->z = base.z * shade;
+
+  if (depth > 0) {                               // reflection
+    axpy(&r, d, -2.0 * dot(d, &n), &n);
+    trace(&p, &r, depth - 1, &seen);
+    out->x += mirror * (seen.x - out->x);
+    out->y += mirror * (seen.y - out->y);
+    out->z += mirror * (seen.z - out->z);
+  }
+}
+
+int channel(double v) {
+  return v >= 1.0 ? 255 : (int)(sqrt(v) * 255.0);
+}
+
+int main() {
+  struct vec eye = {0.0, 1.3, -3.2}, d, c, sum;
+  int x, y, i, rgb;
+  unit(&light);
+  for (y = 0; y < H; y++)
+    for (x = 0; x < W; x++) {
+      sum.x = sum.y = sum.z = 0.0;
+      for (i = 0; i < 4; i++) {                  // 2 x 2 samples
+        d.x = (x + (i & 1) * 0.5 - W / 2) / H;
+        d.y = (H / 2 - y - (i >> 1) * 0.5) / H - 0.12;
+        d.z = 1.0;
+        unit(&d);
+        trace(&eye, &d, 3, &c);
+        sum.x += c.x / 4; sum.y += c.y / 4; sum.z += c.z / 4;
+      }
+      rgb = channel(sum.x) << 16 | channel(sum.y) << 8
+          | channel(sum.z);
+      plot(x, y, rgb);
+    }
+  return 0;
+}
+`,
+'mandelbrot.c': `// The Mandelbrot set, in doubles, printed as text.
+
+int mandel(double cr, double ci) {
+  double zr = 0.0, zi = 0.0;
+  int i = 0;
+  while (i < 60 && zr * zr + zi * zi < 4.0) {
+    double t = zr * zr - zi * zi + cr;
+    zi = 2.0 * zr * zi + ci;
+    zr = t;
     i++;
   }
   return i;
 }
 
 int main() {
+  char *shades = " .,:;=+*#%@";
   int x, y;
   for (y = -14; y <= 14; y++) {
     for (x = -52; x <= 25; x++)
-      putchar(" .,:;=+*#%@"[mandel(x * 170, y * 330) * 10 / 60]);
+      putchar(shades[mandel(x / 24.0, y / 12.5) * 10 / 60]);
     putchar('\\n');
   }
   return 0;
 }
 `,
-'primes.c': `// Sieve of Eratosthenes. The array lives in WebAssembly linear memory.
+'primes.c': `// Sieve of Eratosthenes over a char array in linear memory.
+#define N 10000
 
-int sieve[10000];
+char composite[N];
 
 void print(int n) {
   if (n > 9) print(n / 10);
@@ -73,27 +203,27 @@ void print(int n) {
 
 int main() {
   int i, j, count = 0;
-  for (i = 2; i < 10000; i++) {
-    if (sieve[i]) continue;
+  for (i = 2; i < N; i++) {
+    if (composite[i]) continue;
     count++;
     if (count <= 100) { print(i); putchar(count % 10 ? ' ' : '\\n'); }
-    for (j = i * i; j < 10000; j += i) sieve[j] = 1;
+    for (j = i * i; j < N; j += i) composite[j] = 1;
   }
   return count;
 }
 `,
-'hanoi.c': `// Recursion, globals and strings: Towers of Hanoi.
+'hanoi.c': `// Towers of Hanoi: recursion, a global counter and char * strings.
 
 int moves;
 
-void puts(int s) { int i = 0; while (s[i]) putchar(s[i++]); }
+void puts(char *s) { while (*s) putchar(*s++); }
 
 void print(int n) {
   if (n > 9) print(n / 10);
   putchar('0' + n % 10);
 }
 
-void hanoi(int n, int from, int to, int via) {
+void hanoi(int n, char from, char to, char via) {
   if (n == 0) return;
   hanoi(n - 1, from, via, to);
   moves++;
@@ -113,24 +243,43 @@ int main() {
 };
 
 const $ = id => document.getElementById(id), src = $('src'), status = $('status');
-let bytes = null;
+let bytes = null, built = '';
 
 function build() {
   status.className = '';
   try {
     const t = performance.now();
     bytes = CC.compile(src.value);
-    status.textContent = `${src.value.length} bytes of C → ${bytes.length} bytes of WebAssembly in ${(performance.now() - t).toFixed(1)} ms`;
+    built = `${src.value.length} bytes of C → ${bytes.length} bytes of WebAssembly in ${(performance.now() - t).toFixed(1)} ms`;
+    status.textContent = built;
     $('hex').textContent = [...bytes].reduce((s, b, i) => s + (i % 24 ? ' ' : (i ? '\n' : '') + i.toString(16).padStart(4, '0') + '  ') + b.toString(16).padStart(2, '0'), '');
   } catch (e) { bytes = null; status.className = 'err'; status.textContent = e.message; }
+}
+
+function paint(px) {
+  const cv = $('cv');
+  cv.hidden = !px.length;
+  if (!px.length) return;
+  let w = 1, h = 1;
+  for (let i = 0; i < px.length; i += 3) { if (px[i] >= w) w = px[i] + 1; if (px[i + 1] >= h) h = px[i + 1] + 1; }
+  cv.width = w; cv.height = h;
+  const g = cv.getContext('2d'), img = g.createImageData(w, h), d = new Uint32Array(img.data.buffer);
+  for (let i = 0; i < px.length; i += 3) {
+    const x = px[i], y = px[i + 1], c = px[i + 2];
+    if (x >= 0 && y >= 0) d[y * w + x] = 0xff000000 | (c & 255) << 16 | (c & 0xff00) | (c >> 16 & 255);   // rgb to little-endian rgba
+  }
+  g.putImageData(img, 0, 0);
 }
 
 async function run() {
   build();
   if (!bytes) return;
   try {
-    const t = performance.now(), r = await CC.run(bytes);
-    $('out').textContent = r.out + `\n[main returned ${r.ret} in ${(performance.now() - t).toFixed(1)} ms]`;
+    const t = performance.now(), r = await CC.run(bytes), ms = performance.now() - t;
+    paint(r.pixels);
+    const drew = r.pixels.length ? `, drew ${$('cv').width} × ${$('cv').height} pixels` : '';
+    status.textContent = `${built} · ran in ${ms.toFixed(0)} ms`;
+    $('out').textContent = r.out + `${r.out && !r.out.endsWith('\n') ? '\n' : ''}[main returned ${r.ret}${drew}]`;
   } catch (e) { $('out').textContent = 'runtime error: ' + e.message; }
 }
 
@@ -142,7 +291,7 @@ src.onkeydown = e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); }
   if (e.key === 'Tab') { e.preventDefault(); src.setRangeText('  ', src.selectionStart, src.selectionEnd, 'end'); build(); }
 };
-src.value = EXAMPLES['mandelbrot.c'];
+src.value = EXAMPLES['raytracer.c'];
 run();
 </script>
 </html>
